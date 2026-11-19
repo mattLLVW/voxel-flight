@@ -44,7 +44,7 @@ on a chip with no floating point unit.
 
 | File | What it is |
 |---|---|
-| `voxel-flight.ino` | The rendering and simulation engine, included as C++ by the ESP-IDF entry point. |
+| `main/voxel-flight.cpp` | The rendering and simulation engine. |
 | `main/board_bsp.cpp` | Waveshare display, DMA output, I²C touch controller and BOOT-button setup. |
 | `main/main.cpp` | ESP-IDF `app_main` entry point and FreeRTOS frame loop. |
 | `flight_types.h` | Shared structs and enums (biomes, materials, plane models, bridges, day light, balloons). |
@@ -314,7 +314,7 @@ the C6.
 
 ## Things to tweak
 
-All of these are named constants in `voxel-flight.ino`, near the top or at the start of the
+All of these are named constants in `main/voxel-flight.cpp`, near the top or at the start of the
 section named.
 
 | Constant | Default | Effect |
@@ -340,10 +340,10 @@ section named.
 
 ## Design rules (carried over from spore-cell)
 
-- **Keep the display-independent renderer separate from board setup.** `voxel-flight.ino` owns
+- **Keep the display-independent renderer separate from board setup.** `main/voxel-flight.cpp` owns
   simulation and RGB565 pixels; `main/board_bsp.cpp` owns the Waveshare hardware.
 - **New shared structs go in `flight_types.h`.** Keep forward declarations for engine functions
-  that are called before their definitions because ESP-IDF compiles the included `.ino` as C++.
+  that are called before their definitions because ESP-IDF compiles the engine as C++.
 - **No floating point in per-pixel or per-cell loops.** The C6 has no FPU. The 3D bridge
   triangles and lines first used floats per row and per pixel, and cost up to 40 ms a frame; in
   fixed point they cost 2–4 ms.

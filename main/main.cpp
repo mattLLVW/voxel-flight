@@ -1,7 +1,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#include "../voxel-flight.ino"
+void setup();
+void loop();
 
 extern "C" void app_main(void)
 {

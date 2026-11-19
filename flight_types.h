@@ -1,4 +1,4 @@
-// Types shared by voxel-flight.ino.
+// Types shared by main/voxel-flight.cpp.
 #pragma once
 #include <stdint.h>
 
