@@ -86,3 +86,5 @@ inline IdCompatibleSerial Serial;
 void board_init();
 void board_blit(const uint16_t *frame, int width, int height);
 bool board_selection_pressed();
+bool board_calibrate_flight_controls();
+bool board_flight_controls(float &steer, float &climb);

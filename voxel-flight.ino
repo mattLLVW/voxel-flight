@@ -938,6 +938,7 @@ const PlaneDef *PL = &PLANES[0];
 int32_t planeX, planeY;          // 8.8 cells
 float planeAlt;                  // height units
 float altTarget;                 // filtered target height
+float manualAltitude = 0;        // tilt-commanded offset, terrain clearance is still automatic
 float heading;                   // radians, 0 = +x, counter-clockwise
 float turnRate = 0, bank = 0, climb = 0;
 float wanderPhase[4];
@@ -1065,6 +1066,8 @@ void updateTrick() {
 
 void updateFlight() {
   tick++;
+  float tiltSteer = 0, tiltClimb = 0;
+  const bool manualFlight = board_flight_controls(tiltSteer, tiltClimb);
   float t = tick;
   float ch = cosf(heading), sh = sinf(heading);
   float turnScale = PL->maxTurn / 0.02f;
@@ -1112,7 +1115,10 @@ void updateFlight() {
   float clr = PL->clrMid + PL->clrMid * 0.5f * sinf(t * 0.0021f + wanderPhase[0]) + PL->clrMid * 0.25f * sinf(t * 0.0057f + wanderPhase[1]);
   clr = clr < PL->clrMin ? PL->clrMin : clr;
   clearanceNow = (int)clr;
-  float want = need + clr;
+  manualAltitude += tiltClimb * 0.18f;
+  manualAltitude = clampf(manualAltitude, -60, 80);
+  if (!manualFlight) manualAltitude *= 0.997f;
+  float want = max(need + PL->clrMin, need + clr + manualAltitude);
   if (flybyAlt > want) want = flybyAlt;                 // up to a balloon's height for a flyby
   altTarget += (want - altTarget) * (want > altTarget ? 0.15f : 0.02f);   // rise sooner than sink
   float maxClimb = 0.8f + PL->speed * 0.5f;
@@ -1132,6 +1138,7 @@ void updateFlight() {
   float wander = (0.010f * sinf(t * 0.0031f + wanderPhase[2]) + 0.006f * sinf(t * 0.0013f + wanderPhase[3])) * turnScale;
   float valley = clampf((hl - hr) * 0.0005f * turnScale, -0.6f * PL->maxTurn, 0.6f * PL->maxTurn);   // > 0: left is higher
   float wantTurn = wander + valley;
+  if (!manualFlight) {
   if (cityTarget) {
     // If the city has a bridge, go in over it: first to a point just beyond its far end, then
     // along the avenue (across the bridge) to the centre
@@ -1181,15 +1188,25 @@ void updateFlight() {
       Serial.printf(">> heading for a city %d cells away\n", (int)sqrtf(dx * dx + dy * dy));
     }
   }
-  balloonSteer(wantTurn);                                 // a balloon flyby takes over the steering
-  if (trickState != TS_IDLE) wantTurn = 0;               // fly straight for aerobatics
-  turnRate += (wantTurn - turnRate) * 0.03f;
+  }
+  if (!manualFlight) {
+    balloonSteer(wantTurn);                               // a balloon flyby takes over the steering
+    if (trickState != TS_IDLE) wantTurn = 0;              // fly straight for aerobatics
+  } else {
+    wantTurn = tiltSteer * PL->maxTurn * 0.8f;
+    if (trickState == TS_LINEUP) {
+      trickState = TS_IDLE;
+      scheduleTrick(300, 600);
+    }
+  }
+  turnRate += (wantTurn - turnRate) * (manualFlight ? 0.14f : 0.03f);
   turnRate = clampf(turnRate, -PL->maxTurn, PL->maxTurn);
   heading -= turnRate;                                     // positive turnRate = turning right
   bank += (clampf(turnRate * PL->bankPerTurn, -PL->maxBank, PL->maxBank) - bank) * 0.06f;
 
   planeX += (int32_t)(cosf(heading) * PL->speed * 256);
   planeY += (int32_t)(sinf(heading) * PL->speed * 256);
+  if (manualFlight && trickState == TS_IDLE) nextTrick = tick + 300;
   updateTrick();
 
   // Camera: behind and above, lagging the heading and height a little, so the plane swings
@@ -2548,6 +2565,8 @@ void setup() {
   PL = &PLANES[pick];
   tick = 0;
   generateWorld();
+  if (board_calibrate_flight_controls())
+    Serial.println("Tilt controls: left/right to steer, up/down to climb or descend; BOOT re-centres");
 }
 
 // Timing report: averages and worst case over the last REPORT_FRAMES frames

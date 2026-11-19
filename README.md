@@ -67,6 +67,25 @@ MOSI/CLK/CS/DC/RST on GPIO 4/5/7/6/14, and touch SDA/SCL on GPIO 18/8. The touch
 read at address `0x15`. On the selection screen either a touch or the physical BOOT button (GPIO9)
 chooses a plane.
 
+## Flight controls
+
+The onboard QMI8658 gyroscope and accelerometer provide tilt controls, with the board held in
+landscape:
+
+- Tilt left/right to steer.
+- Tilt the top of the board up/down to climb or descend.
+- Hold the board still once the plane is chosen: the neutral position and the gyroscope's zero
+  offset are calibrated when the world has been generated.
+- Press BOOT at any time to re-centre the controls on the current hold.
+- About 3 seconds at neutral hands the plane back to the autopilot.
+
+The gyro rate is integrated for smooth, lag-free angles and a complementary filter lets gravity
+from the accelerometer slowly correct its drift (ignored while the board is being shaken). A dead
+zone prevents drift while holding the board normally. The terrain-clearance planner stays active
+in manual flight, so a downward command cannot fly below the safety clearance. If a tilt goes the
+wrong way, flip `INVERT_STEER` / `INVERT_CLIMB` in `main/board_bsp.cpp`; set `DEBUG_TILT` to log
+the angles over serial.
+
 ## Building and uploading
 
 Use ESP-IDF 6.1 or newer. The checked-in `sdkconfig.defaults` selects ESP32-C6 and the 8 MB flash.
