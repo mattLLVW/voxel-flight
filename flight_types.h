@@ -1,7 +1,6 @@
-// Types shared by voxel-flight.ino. They live in a header because the Arduino build inserts
-// function prototypes near the top of the .ino, before any struct declared there.
+// Types shared by voxel-flight.ino.
 #pragma once
-#include <Arduino.h>
+#include <stdint.h>
 
 // Biomes. The world blends between them along a slow "biome" noise field; the order they
 // appear in is shuffled by the world seed, so neighbours differ from boot to boot.

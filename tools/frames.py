@@ -1,7 +1,7 @@
 """Turn a Voxel Flight capture (from capture.ps1) into an animated GIF and/or PNG frames.
 
-Each frame in the capture is the 4 bytes "VFRM" followed by 64x64 RGB565 pixels (big-endian),
-exactly what is sent to the OLED. Anything else in the file (the text log) is skipped.
+Each frame in the capture is the 4 bytes "VFRM" followed by 128x68 RGB565 pixels (big-endian).
+Anything else in the file (the text log) is skipped.
 
     python tools/frames.py capture.bin --list
     python tools/frames.py capture.bin --gif demo.gif --start 12 --length 10 --scale 6
@@ -13,7 +13,7 @@ import argparse
 import os
 import sys
 
-W = H = 64
+W, H = 128, 68
 FRAME = W * H * 2
 FPS = 30
 

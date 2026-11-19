@@ -1,12 +1,13 @@
 # Voxel Flight
 
-**An endless, procedurally generated flight sim on a 64×64 pixel colour OLED, running on a
-tiny ESP32-C3.**
+**An endless, procedurally generated flight sim for the Waveshare ESP32-C6 1.9" Touch,
+built as a native ESP-IDF project.**
 
-> **Vibe coded with Claude.** This whole project was written by
+> **Vibe coded with Claude.** The original project was written by
 > [Claude](https://claude.ai) (Anthropic's AI) through conversation, as a stress test of how far an
 > **ESP32-C3 SuperMini** and a **0.6" 64×64 SSD1357 OLED** can be pushed. I described what I wanted
-> and gave feedback from watching the screen; Claude wrote and tuned the code.
+> and gave feedback from watching the screen; Claude wrote and tuned the code. This port keeps the
+> renderer but targets the integrated C6, SH8601 display and touch controller through ESP-IDF.
 
 ![Flying into a waterfront city at sunset as the lights come on](media/sunset-city.gif)
 
@@ -26,9 +27,9 @@ moonlit night with city lights coming on window by window. Every boot is a new w
 | ![Sunrise over the water](media/sunrise.gif) | ![Plane select screen](media/plane-select.gif) | ![A city at night](media/night-city.gif) |
 | Sunrise over the coast | Choosing a plane | A city at night under the moon |
 
-*These are the real frames from the device (captured over USB, see
-[Recording videos](#recording-videos)), shown 5× larger. On the 0.6" screen it's a sharp,
-smooth 30 fps.*
+*These are real frames from the original 64×64 build (captured over USB, see
+[Recording videos](#recording-videos)). The C6 port renders a wider 128×68 game frame and scales
+it across the 320×170 display.*
 
 Highlights: a voxel-space ray-marched renderer with smooth shading, a 256×256 streaming map,
 five blended biomes, cities with individual buildings and lit windows, 3D suspension bridges,
@@ -43,8 +44,10 @@ on a chip with no floating point unit.
 
 | File | What it is |
 |---|---|
-| `voxel-flight.ino` | The whole program. A contents list at the top names every section. |
-| `flight_types.h` | Shared structs and enums (biomes, materials, plane models, bridges, day light, balloons). Must stay in this folder. |
+| `voxel-flight.ino` | The rendering and simulation engine, included as C++ by the ESP-IDF entry point. |
+| `main/board_bsp.cpp` | Waveshare display, DMA output, I²C touch controller and BOOT-button setup. |
+| `main/main.cpp` | ESP-IDF `app_main` entry point and FreeRTOS frame loop. |
+| `flight_types.h` | Shared structs and enums (biomes, materials, plane models, bridges, day light, balloons). |
 | `tools/capture.ps1`, `tools/frames.py` | Record the screen over USB and turn it into GIFs (see [Recording videos](#recording-videos)). |
 | `media/` | The GIFs above. |
 | `README.md` | This file. |
@@ -54,67 +57,37 @@ on a chip with no floating point unit.
 
 ## Hardware
 
-Two modules and seven wires; no other parts.
-
 | Part | Notes |
 |---|---|
-| **ESP32-C3 SuperMini** | Any ESP32-C3 board should work if you change the pins at the top of the sketch. |
-| **0.6" 64×64 RGB OLED, SSD1357** | SPI. The breakout this was built on is labelled GND, VCC, SCL, SDA, RES, DC, CS. |
-| Jumper wires, USB-C cable | Powered from USB. |
+| **Waveshare ESP32-C6 1.9" Touch** | Integrated ESP32-C6, 170×320 SH8601 display and I²C touch controller. |
+| USB cable | Powers and flashes the board. |
 
-The SuperMini's **BOOT button** (GPIO9) picks a plane on the selection screen. No extra wiring.
-
-| OLED pin | ESP32-C3 |
-|---|---|
-| GND | GND |
-| VCC | 3V3 |
-| SCL (clock) | GPIO4 |
-| SDA (data) | GPIO6 |
-| CS | GPIO7 |
-| DC | GPIO1 |
-| RES | GPIO0 |
-
-## Library (needs two local patches)
-
-[SparkFun RGB OLED 64x64 library](https://github.com/sparkfun/Sparkfun_RGB_OLED_64x64_Arduino_Library)
-(install it from the Arduino Library Manager), patched in two places so it builds for the
-ESP32-C3. **Updating the library undoes both.**
-
-1. `src/util/font5x7.h` — include `<Arduino.h>` instead of `<avr/pgmspace.h>`.
-2. `src/SparkFun_SSD1357_OLED.cpp` line 394 — add `return 0;`.
-
-The sketch also includes the library's `util/font5x7.h` for the selection screen's text.
-The colour fix (red/blue swap) is in the sketch:
-`oled.setRemapColorDepth(false, true, false, true, true, SSD1357_COLOR_MODE_65k)` after `begin()`.
+No wiring is required. The BSP uses the pinout from the supplied Waveshare example: display
+MOSI/CLK/CS/DC/RST on GPIO 4/5/7/6/14, and touch SDA/SCL on GPIO 18/8. The touch controller is
+read at address `0x15`. On the selection screen either a touch or the physical BOOT button (GPIO9)
+chooses a plane.
 
 ## Building and uploading
 
-Needs the **esp32 by Espressif** boards package (Arduino Boards Manager). The folder must be
-called `voxel-flight` (Arduino wants the folder named after the `.ino`).
+Use ESP-IDF 6.1 or newer. The checked-in `sdkconfig.defaults` selects ESP32-C6 and the 8 MB flash.
+Open this directory as an ESP-IDF project, or build from an ESP-IDF shell:
 
-**Arduino IDE:** board **ESP32C3 Dev Module**, your board's port, **USB CDC On Boot: Enabled**,
-then Upload.
-
-**Command line** (from this folder; change `COM4` to your port):
-
-```
-arduino-cli compile --fqbn esp32:esp32:esp32c3:CDCOnBoot=cdc .
-arduino-cli upload -p COM4 --fqbn esp32:esp32:esp32c3:CDCOnBoot=cdc .
+```sh
+idf.py set-target esp32c6
+idf.py build
+idf.py flash monitor
 ```
 
-(The Arduino IDE ships `arduino-cli.exe` in
-`%LOCALAPPDATA%\Programs\Arduino IDE\resources\app\lib\backend\resources\`.)
-
-Uses about 31% of flash and 70% of RAM. Most of the RAM is the 256×256 height and colour maps
-(128 KB), the plane's supersampling buffers (36 KB), the two DMA frame buffers (16 KB) and the
-depth buffer (4 KB).
+No Arduino libraries or component-registry packages are required. The build currently links at
+about 79% of DIRAM, including 12.8 KB of DMA strip buffers, leaving about 93 KB headroom for
+ESP-IDF services and the running application.
 
 ## Recording videos
 
 The GIFs above are the board's own frames, sent to the PC over the USB cable.
 
-1. Set `CAPTURE_FRAMES = true` near the top of the sketch and upload. Every frame is then also
-   sent over USB (8 KB a frame; it keeps up at 30 fps).
+1. Set `CAPTURE_FRAMES = true` near the top of the sketch and upload. Each 128×68 RGB565 frame is
+   also sent over USB.
 2. Record (Windows PowerShell, from this folder; change the port):
    `powershell -ExecutionPolicy Bypass -File tools\capture.ps1 -Port COM4 -Seconds 60 -Out capture.bin`
 3. Make a GIF (needs Python and `pip install pillow`):
@@ -134,7 +107,7 @@ After a reset, each plane spins on a turntable under a soft spotlight for 3.5 s.
 the top, three dots show which of the three it is, and three stat bars show **SPD** (speed),
 **AGI** (agility) and **ALT** (cruising height).
 
-- **Press BOOT** while a plane is on screen to fly that one.
+- **Touch the screen** or press **BOOT** while a plane is on screen to fly that one.
 - If you don't press anything, it picks one at random after showing all three.
 
 The chosen plane's name flashes, then the world is generated (about 0.75 s) and the flight starts.
@@ -313,19 +286,10 @@ To skip the screen while testing, set `FORCE_PLANE` to 0, 1 or 2.
 - `>> entering <biome>`, `>> heading for a city N cells away`, `>> over the city`,
   `>> bridge, N cells long`, `>> loop the loop`, `>> barrel roll`.
 
-Measured on the device, against the 33 ms (30 fps) budget (latest version, dusk and night):
-
-| Plane | Average frame | Worst frame |
-|---|---|---|
-| RACER (loops, hardest turns) | 16–23 ms | up to ~29 ms |
-| CUB | 13–20 ms | up to ~22 ms |
-
-The frame goes to the display by DMA in the background (`dmaInit` / `blit`): the library
-starts the display, then the bus is handed to the ESP-IDF SPI driver, the 3 window commands are
-sent and the 8 KB of pixels are queued from one of two buffers while the next frame is drawn.
-That took the blit from 9.3 ms to 0.6 ms. Typical costs now: terrain 4–8 ms, map generation
-2–6 ms, bridges, trails and plane 3–5 ms, sky with the 3D cloud layer 1.5–4 ms. The report also prints how many bridges
-are known and how far the nearest one is.
+The 128×68 simulation frame is nearest-neighbour scaled to 320×170 in the display BSP. It is sent
+at 40 MHz as 10-row strips using two DMA buffers, keeping the transfer-buffer cost to 12.8 KB.
+The timing report runs against a 33 ms target and remains useful for checking rendering speed on
+the C6.
 
 ---
 
@@ -350,27 +314,23 @@ section named.
 | `CITY_SEARCH_FRAMES` | 1800 | How often the autopilot looks for a city to visit (frames, 30 per second) |
 | `SMOOTH_DIST` (terrain renderer) | 45 | How far out terrain heights, shading and material edges are smoothed |
 | `BIOME_BLEND` | 112 | Width of the soft border between biomes (out of 256 per band, max 128) |
-| `HORIZON_Y` | 20 | Horizon row; lower = looking more level |
+| `HORIZON_Y` | 21 | Horizon row; lower = looking more level |
 | `ZFAR` / `FOG_START` | 100 / 0.45 | View distance (must stay well under 128); where the haze begins |
 | `SEA` | 40 | Water level |
 | `MAT_RGB` / `MAT_GLOW` | | Day colour and night glow of every material |
 
 ## Design rules (carried over from spore-cell)
 
-- **Large dim areas show faint horizontal lines on this OLED.** But a near-black night was too
-  dark to see anything, and a grey night haze made the ground look washed out. Night now uses
-  clearly moonlit ground fading into a dark navy haze that matches the night sky.
-- **New structs go in `flight_types.h`.** The Arduino build inserts function prototypes above any
-  struct declared in the `.ino`, which breaks compilation. Globals used by a function must be
-  declared above it, so bridge data that the autopilot needs is reached through a function
-  (`bridgeAhead`).
-- **No floating point in per-pixel or per-cell loops.** The C3 has no FPU. The 3D bridge
+- **Keep the display-independent renderer separate from board setup.** `voxel-flight.ino` owns
+  simulation and RGB565 pixels; `main/board_bsp.cpp` owns the Waveshare hardware.
+- **New shared structs go in `flight_types.h`.** Keep forward declarations for engine functions
+  that are called before their definitions because ESP-IDF compiles the included `.ino` as C++.
+- **No floating point in per-pixel or per-cell loops.** The C6 has no FPU. The 3D bridge
   triangles and lines first used floats per row and per pixel, and cost up to 40 ms a frame; in
   fixed point they cost 2–4 ms.
 - **Keep motion smooth.** Filter every autopilot input; use soft floors instead of clamps; draw
   moving things with sub-pixel positions and soft edges; spread work evenly across frames.
 - `constrain()` didn't clamp floats reliably; use `clampf` / `clampi`.
-- Don't give functions default arguments in the `.ino`. The auto-generated prototypes would repeat them.
 
 ## Ideas for later
 

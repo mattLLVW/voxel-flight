@@ -1,12 +1,6 @@
-// ESP32-C3 Voxel Flight: pick a plane, then fly it third-person over endless procedural
-// countryside and skyscraper cities, on the 0.6" 64x64 SSD1357 colour OLED.
-// Wiring: GND->GND  VCC->3V3  SCL->GPIO4  SDA->GPIO6  CS->GPIO7  DC->GPIO1  RES->GPIO0
-// The BOOT button (GPIO9 on the SuperMini) picks a plane on the selection screen.
-// Needs the (patched) SparkFun RGB OLED 64x64 library. Everything is drawn into a RAM
-// framebuffer and blitted in one SPI burst per frame (same approach as spore-cell).
-// See README.md in this folder for how to build it, what's in it, and what to tweak.
-// Vibe coded with Claude (Anthropic's AI) as a stress test for the ESP32-C3 SuperMini and a
-// 64x64 OLED.
+// ESP32-C6 Voxel Flight: pick a plane by touch, then fly it third-person over endless
+// procedural countryside and skyscraper cities on the Waveshare ESP32-C6 1.9" Touch LCD.
+// The 128x68 renderer is DMA-scaled to the board's 320x170 landscape display.
 //
 // CONTENTS - search for these section headers ("// ---------- name"):
 //   pins and settings ........ right below: screen, camera, day/night, world constants
@@ -26,25 +20,12 @@
 //   setup and main loop ...... startup and the per-frame update / draw / timing report
 // Shared structs and enums live in flight_types.h.
 
-#include <SPI.h>
-#include "SparkFun_RGB_OLED_64x64.h"
-#include "util/font5x7.h"
+#include "board_bsp.h"
 #include "flight_types.h"
-#include "driver/spi_master.h"
-#include "driver/gpio.h"
+#include "esp_random.h"
 
 // ---------- pins and settings ----------
-#define PIN_SCK  4
-#define PIN_MOSI 6
-#define PIN_CS   7
-#define PIN_DC   1
-#define PIN_RES  0
-#define PIN_BTN  9          // BOOT button on the SuperMini (pressed = LOW)
-#define SPI_HZ   8000000
-
-RGB_OLED_64x64 oled;
-
-const int W = 64, H = 64;
+const int W = 128, H = 68;
 uint16_t fb[W * H];
 uint8_t  zb[W * H];          // depth per pixel (2 per cell, 255 = sky), for bridges
 uint8_t  sin8[256];
@@ -54,9 +35,9 @@ const uint32_t FRAME_MS = 33;      // ~30 fps target
 
 // Camera / projection. Horizontal: 1 map cell = 1 unit. Vertical: heights 0..255, 2 per cell.
 const float TAN_HALF_FOV = 0.75f;              // horizontal half field of view (about 74 deg total)
-const float KX = 32.0f / TAN_HALF_FOV;         // pixels per cell at distance 1
+const float KX = (W * 0.5f) / TAN_HALF_FOV;     // pixels per cell at distance 1
 const float KY = KX / 2;                       // pixels per height unit at distance 1
-const int   HORIZON_Y = 20;                    // screen row of the horizon (camera looks slightly down)
+const int   HORIZON_Y = 21;                    // screen row of the horizon (camera looks slightly down)
 const float ZFAR = 100;                        // view distance in cells
 const float FOG_START = 0.45f;                 // fraction of ZFAR where the haze begins
 const float CAM_ROLL_SHARE = 0.4f;             // how much of the bank the camera follows
@@ -75,7 +56,7 @@ const int NIGHT_HAZE[3] = { 12, 16, 34 };      // night: dark navy at the horizo
 const int NIGHT_SKY[3] = { 3, 5, 16 };         // night sky overhead
 const int NIGHT_CLOUD[3] = { 46, 52, 74 };     // moonlit clouds
 const int NIGHT_LIGHT[3] = { 100, 110, 150 };  // moonlit ground multiplier /256 (raise if too dark,
-                                               // but dim areas show faint scan lines on this OLED)
+                                               // but dim areas show faint scan lines on this display)
 
 // World
 const int SEA = 40;                            // water level (height units)
@@ -113,84 +94,67 @@ static inline uint16_t blend565(uint16_t c, int r, int g, int b, int a) {
 
 inline void px(int x, int y, uint16_t c) { if ((unsigned)x < W && (unsigned)y < H) fb[y * W + x] = c; }
 
-// 5x7 text from the OLED library's font (6 px per character)
+uint8_t fontGlyph(char c, int col) {
+  static const uint8_t C[] = { 0x3E, 0x41, 0x41, 0x41, 0x22 };
+  static const uint8_t U[] = { 0x3F, 0x40, 0x40, 0x40, 0x3F };
+  static const uint8_t B[] = { 0x7F, 0x49, 0x49, 0x49, 0x36 };
+  static const uint8_t R[] = { 0x7F, 0x09, 0x19, 0x29, 0x46 };
+  static const uint8_t A[] = { 0x7C, 0x12, 0x11, 0x12, 0x7C };
+  static const uint8_t E[] = { 0x7F, 0x49, 0x49, 0x49, 0x41 };
+  static const uint8_t J[] = { 0x20, 0x40, 0x41, 0x3F, 0x01 };
+  static const uint8_t T[] = { 0x01, 0x01, 0x7F, 0x01, 0x01 };
+  static const uint8_t S[] = { 0x46, 0x49, 0x49, 0x49, 0x31 };
+  static const uint8_t P[] = { 0x7F, 0x09, 0x09, 0x09, 0x06 };
+  static const uint8_t D[] = { 0x7F, 0x41, 0x41, 0x22, 0x1C };
+  static const uint8_t G[] = { 0x3E, 0x41, 0x49, 0x49, 0x3A };
+  static const uint8_t I[] = { 0x00, 0x41, 0x7F, 0x41, 0x00 };
+  static const uint8_t L[] = { 0x7F, 0x40, 0x40, 0x40, 0x40 };
+  const uint8_t *glyph = nullptr;
+  switch (c) {
+    case 'C': glyph = C; break; case 'U': glyph = U; break;
+    case 'B': glyph = B; break; case 'R': glyph = R; break;
+    case 'A': glyph = A; break; case 'E': glyph = E; break;
+    case 'J': glyph = J; break; case 'T': glyph = T; break;
+    case 'S': glyph = S; break; case 'P': glyph = P; break;
+    case 'D': glyph = D; break; case 'G': glyph = G; break;
+    case 'I': glyph = I; break; case 'L': glyph = L; break;
+  }
+  return glyph ? glyph[col] : 0;
+}
+
+// 5x7 text (6 px per character)
 void drawText(int x, int y, const char *s, uint16_t c) {
   for (; *s; s++, x += 6) {
-    const unsigned char *g = font5x7 + 6 + (uint8_t)*s * 5;
     for (int col = 0; col < 5; col++) {
-      uint8_t bits = pgm_read_byte(g + col);
+      uint8_t bits = fontGlyph(*s, col);
       for (int row = 0; row < 7; row++) if (bits & (1 << row)) px(x + col, y + row, c);
     }
   }
 }
 int textWidth(const char *s) { return strlen(s) * 6 - 1; }
 
-// Frames go to the display by DMA in the background. The library starts the display up over the
-// Arduino SPI driver; then dmaInit() hands the bus to the ESP-IDF SPI driver. blit() converts the
-// frame into one of two byte buffers, waits for the previous frame's transfer to finish
-// (normally long done), sends the 3 short window commands, and queues the 8 KB of pixels, which
-// then go out by DMA while the next frame is being drawn. The D/C pin is set per transaction.
-spi_device_handle_t oledDev = nullptr;
-DMA_ATTR uint8_t txBuf[2][W * H * 2] __attribute__((aligned(4)));
-int txCur = 0;
-bool dmaPending = false;
-spi_transaction_t dmaTrans;
-
-static void IRAM_ATTR oledPreCb(spi_transaction_t *t) { gpio_set_level((gpio_num_t)PIN_DC, (int)(intptr_t)t->user); }
-
-void dmaInit() {
-  SPI.end();
-  spi_bus_config_t bus = {};
-  bus.mosi_io_num = PIN_MOSI; bus.miso_io_num = -1; bus.sclk_io_num = PIN_SCK;
-  bus.quadwp_io_num = -1; bus.quadhd_io_num = -1;
-  bus.max_transfer_sz = W * H * 2;
-  spi_device_interface_config_t dev = {};
-  dev.clock_speed_hz = SPI_HZ;
-  dev.mode = 3;                                          // as the library uses
-  dev.spics_io_num = PIN_CS;
-  dev.queue_size = 2;
-  dev.pre_cb = oledPreCb;
-  esp_err_t e1 = spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_CH_AUTO);
-  esp_err_t e2 = spi_bus_add_device(SPI2_HOST, &dev, &oledDev);
-  pinMode(PIN_DC, OUTPUT);
-  Serial.printf("DMA display transfer: %s\n", (e1 == ESP_OK && e2 == ESP_OK) ? "on" : "FAILED");
-  if (e2 != ESP_OK) oledDev = nullptr;
-}
-
-static void oledSend(const uint8_t *d, int n, int dc) {   // short blocking transfer
-  spi_transaction_t t = {};
-  t.length = n * 8;
-  t.user = (void *)(intptr_t)dc;
-  if (n <= 4) { t.flags = SPI_TRANS_USE_TXDATA; memcpy(t.tx_data, d, n); } else t.tx_buffer = d;
-  spi_device_polling_transmit(oledDev, &t);
-}
-
 void blit() {
-  uint8_t *tx = txBuf[txCur];
-  for (int i = 0; i < W * H; i++) { tx[2 * i] = fb[i] >> 8; tx[2 * i + 1] = fb[i] & 0xFF; }
-  if (CAPTURE_FRAMES) {                                  // copy of the frame to the PC (see tools/)
+  if (CAPTURE_FRAMES) {
+    uint8_t row[W * 2];
     Serial.write((const uint8_t *)"VFRM", 4);
-    Serial.write(tx, W * H * 2);
+    for (int y = 0; y < H; y++) {
+      for (int x = 0; x < W; x++) {
+        row[x * 2] = fb[y * W + x] >> 8;
+        row[x * 2 + 1] = fb[y * W + x] & 0xff;
+      }
+      Serial.write(row, sizeof(row));
+    }
   }
-  if (!oledDev) {                                        // before dmaInit (or if it failed)
-    oled.write_ram(tx, OLED_64x64_START_ROW, OLED_64x64_START_COL,
-                   OLED_64x64_STOP_ROW, OLED_64x64_STOP_COL, W * H * 2);
-    return;
-  }
-  if (dmaPending) { spi_transaction_t *r; spi_device_get_trans_result(oledDev, &r, portMAX_DELAY); dmaPending = false; }
-  const uint8_t rowCmd = 0x75, rows[2] = { OLED_64x64_START_ROW, OLED_64x64_STOP_ROW };
-  const uint8_t colCmd = 0x15, cols[2] = { OLED_64x64_START_COL, OLED_64x64_STOP_COL };
-  const uint8_t ramCmd = 0x5C;
-  oledSend(&rowCmd, 1, 0); oledSend(rows, 2, 1);
-  oledSend(&colCmd, 1, 0); oledSend(cols, 2, 1);
-  oledSend(&ramCmd, 1, 0);
-  memset(&dmaTrans, 0, sizeof(dmaTrans));
-  dmaTrans.length = W * H * 2 * 8;
-  dmaTrans.tx_buffer = tx;
-  dmaTrans.user = (void *)1;
-  if (spi_device_queue_trans(oledDev, &dmaTrans, portMAX_DELAY) == ESP_OK) dmaPending = true;
-  txCur ^= 1;                                            // draw the next frame into the other buffer
+  board_blit(fb, W, H);
 }
+
+int bridgeAhead(float px, float py, float ch, float sh, float look);
+bool bridgeWaypoint(int cx, int cy, int px, int py, float hd, float &wx, float &wy);
+bool balloonSteer(float &wantTurn);
+int balloonAhead(float px, float py, float ch, float sh, float look);
+void skyBlob(int cx16, int cy16, int rx16, int ry16, const int *top, const int *bot, int maxA);
+void drawCloudLayer();
+void blendLine(float x0, float y0, float x1, float y1, int r, int g, int b, int a);
 
 // ---------- materials ----------
 // Daylight colour of each material. Some also glow at night (town lights).
@@ -1256,8 +1220,8 @@ bool project(int32_t wx, int32_t wy, float h, float &sx, float &sy, float &zc) {
   zc = rx * camFX + ry * camFY;
   if (zc < 1.0f) return false;
   float xc = rx * camRX + ry * camRY;
-  sx = 32 + xc * KX / zc;
-  sy = HORIZON_Y + (camH - h) * KY / zc + (sx - 32) * shear;
+  sx = W * 0.5f + xc * KX / zc;
+  sy = HORIZON_Y + (camH - h) * KY / zc + (sx - W * 0.5f) * shear;
   return true;
 }
 
@@ -1278,8 +1242,8 @@ static inline void skyPx(int x, int y, uint16_t c) {
 bool skyPos(float az, float elPx, float &sx, float &sy) {
   float d = wrapPi(az - camA);
   if (fabsf(d) > 1.0f) return false;
-  sx = 32 - d * KX;
-  sy = HORIZON_Y - elPx + (sx - 32) * shear;
+  sx = W * 0.5f - d * KX;
+  sy = HORIZON_Y - elPx + (sx - W * 0.5f) * shear;
   return true;
 }
 
@@ -1477,7 +1441,7 @@ void drawCloudLayer() {
     float lw = z * TAN_HALF_FOV;
     int32_t ox = camX + (int32_t)(camFX * z * 256) + drift, oy = camY + (int32_t)(camFY * z * 256);
     int32_t hx = (int32_t)(camRX * lw * 256), hy = (int32_t)(camRY * lw * 256);
-    int32_t dX = hx / 32, dY = hy / 32;
+    int32_t dX = hx * 2 / W, dY = hy * 2 / W;
     int32_t X = ox - hx + dX / 2, Y = oy - hy + dY / 2;
     for (int i = 0; i < W; i++, X += dX, Y += dY) {
       if (done[i]) continue;
@@ -1561,7 +1525,7 @@ static inline bool inShadow(int32_t X, int32_t Y) {
 void renderTerrain() {
   for (int i = 0; i < W; i++) {
     ybuf[i] = H;
-    hz[i] = HORIZON_Y * 256 + (int32_t)((i - 31.5f) * shear * 256);
+    hz[i] = HORIZON_Y * 256 + (int32_t)((i - (W * 0.5f - 0.5f)) * shear * 256);
   }
   memset(zb, 255, sizeof(zb));
   int32_t fX = (int32_t)(camFX * 16384), fY = (int32_t)(camFY * 16384);
@@ -1583,7 +1547,7 @@ void renderTerrain() {
     int32_t lw = (z * 3) >> 2;                      // half width = z * TAN_HALF_FOV
     int32_t hx = (rX * lw) >> 6, hy = (rY * lw) >> 6;
     int32_t X = ox - hx, Y = oy - hy;
-    int32_t dX = hx >> 5, dY = hy >> 5;             // full width / 64 columns
+    int32_t dX = hx * 2 / W, dY = hy * 2 / W;       // full width / screen columns
     X += dX >> 1; Y += dY >> 1;                     // sample at column centres
     for (int i = 0; i < W; i++, X += dX, Y += dY) {
       int yb = ybuf[i];
@@ -1634,7 +1598,7 @@ void renderTerrain() {
       if (MAT_WATER[m]) {                            // water: slow ripples and the odd glint
         uint8_t w = sin8[(uint8_t)(mx * 13 + my * 7 + tick * 2)];
         int l = 2 + (w >> 6);
-        if ((((mx * 29) ^ (my * 71)) + (tick >> 1) & 127) == 0) l = 7;
+        if (((((mx * 29) ^ (my * 71)) + (tick >> 1)) & 127) == 0) l = 7;
         c = (c & 0xF8) | l;
       }
       uint16_t col = pal[c];
@@ -2049,7 +2013,7 @@ bool balloonSteer(float &wantTurn) {
   flybyAlt = 0;
   if (!flyby || !balloon.active || ++flybyFrames > 3600) { flyby = 0; return false; }
   float px = planeX / 256.0f, py = planeY / 256.0f, ch = cosf(heading), sh = sinf(heading);
-  float cx = balloon.x, cy = balloon.y, tx, ty;
+  float cx = balloon.x, cy = balloon.y, tx = cx, ty = cy;
   if (flyby == 1) {
     // a point 16 cells beside the balloon, on the far side from where it started out
     tx = cx - passSide * passRX * 16; ty = cy - passSide * passRY * 16;
@@ -2182,7 +2146,7 @@ void planePoint(float f, float r, float u, int32_t &wx, int32_t &wy, float &wh) 
 // (upside down at the top of a loop, rolling, or seen from any side on the turntable). The
 // primitives are still listed back to front: a later one wins over an earlier one it lies
 // within SS_BIAS of (stripes, panels and canopies sit on the surfaces they're painted on).
-const int SS_N = 96;
+const int SS_N = 160;
 const uint16_t SS_EMPTY = 0xFFFF, SS_BIAS = 80;   // depth in 1/256 cell
 uint16_t ssCol[SS_N * SS_N];
 uint16_t ssZ[SS_N * SS_N];
@@ -2429,15 +2393,16 @@ void setupShadow() {
 
 // ---------- selection screen ----------
 // Each plane spins on a turntable under a soft spotlight with its name and three stat bars
-// (speed, agility, cruising height). Press BOOT to fly the one on screen; after all three have
-// been shown, one is picked at random.
-bool buttonPressed() { return digitalRead(PIN_BTN) == LOW; }
+// (speed, agility, cruising height). Touch the screen to fly the one on display; after all three
+// have been shown, one is picked at random. The board's BOOT button remains available as well.
+bool buttonPressed() { return board_selection_pressed(); }
 
 void drawStatBar(int y, const char *label, int value, uint16_t col) {
-  drawText(8, y, label, rgb(150, 150, 160));
+  const int x = (W - 50) / 2;
+  drawText(x, y, label, rgb(150, 150, 160));
   for (int k = 0; k < 5; k++) {
     uint16_t c = k < value ? col : rgb(40, 40, 48);
-    for (int yy = 1; yy < 6; yy++) for (int xx = 0; xx < 4; xx++) px(29 + k * 6 + xx, y + yy, c);
+    for (int yy = 1; yy < 6; yy++) for (int xx = 0; xx < 4; xx++) px(x + 21 + k * 6 + xx, y + yy, c);
   }
 }
 
@@ -2452,14 +2417,14 @@ void showcaseFrame(int idx, int f, bool chosen) {
   for (int i = 0; i < W; i++) ybuf[i] = H;
   // spotlight on the floor
   int spot[3] = { 55, 65, 85 };
-  skyBlob(32 * 16, 35 * 16, 28 * 16, 5 * 16, spot, spot, 200);
+  skyBlob(W * 8, 35 * 16, 28 * 16, 5 * 16, spot, spot, 200);
   drawPlane();
   const uint8_t *nc = PL->cols[0];
   uint16_t nameCol = rgb(max(nc[0], (uint8_t)120), max(nc[1], (uint8_t)120), max(nc[2], (uint8_t)120));
   if (!chosen || (f / 6) % 2 == 0) drawText((W - textWidth(PL->name)) / 2, 1, PL->name, nameCol);
   for (int k = 0; k < 3; k++) {                          // which plane of three
     uint16_t c = k == idx ? rgb(255, 255, 255) : rgb(60, 60, 70);
-    px(56 + k * 3, 3, c); px(57 + k * 3, 3, c);
+    px(W - 10 + k * 3, 3, c); px(W - 9 + k * 3, 3, c);
   }
   uint16_t bar = rgb(255, 200, 60);
   drawStatBar(40, "SPD", PL->statSpeed, bar);            // 7-pixel rows with a 1-pixel gap, the last
@@ -2468,7 +2433,6 @@ void showcaseFrame(int idx, int f, bool chosen) {
 }
 
 int runSelection() {
-  pinMode(PIN_BTN, INPUT_PULLUP);
   // a private little scene: plane in front of a fixed camera, no terrain
   planeX = planeY = 1000 << 8;
   planeAlt = 100;
@@ -2571,13 +2535,8 @@ void generateWorld() {
 }
 
 void setup() {
-  if (CAPTURE_FRAMES) Serial.setTxBufferSize(16384);   // room for a whole frame
-  Serial.begin(115200);
+  board_init();
   delay(1000);
-  SPI.begin(PIN_SCK, -1, PIN_MOSI, -1);
-  oled.begin(PIN_DC, PIN_RES, PIN_CS, SPI, SPI_HZ);
-  oled.setRemapColorDepth(false, true, false, true, true, SSD1357_COLOR_MODE_65k);  // fixes red/blue swap
-  dmaInit();                                   // from here on, frames go out by DMA
   memset(fb, 0, sizeof(fb));
   blit();
   Serial.println("\nVoxel Flight");

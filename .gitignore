@@ -1,5 +1,9 @@
 # build output
 build/
+managed_components/
+sdkconfig
+sdkconfig.old
+.clangd
 *.elf
 *.bin
 *.map
